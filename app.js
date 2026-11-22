@@ -1,0 +1,191 @@
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/13.4.0/firebase-app.js';
+import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, setPersistence, browserLocalPersistence } from 'https://www.gstatic.com/firebasejs/13.4.0/firebase-auth.js';
+import { getFirestore, doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, collection, onSnapshot, serverTimestamp, Timestamp, runTransaction, writeBatch } from 'https://www.gstatic.com/firebasejs/13.4.0/firebase-firestore.js';
+import { firebaseConfig, isFirebaseConfigured } from './firebase-config.js';
+
+const $ = selector => document.querySelector(selector);
+const sectionNames = {
+  shopping: { title: 'Lista della spesa', intro: 'Le modifiche si aggiornano sui telefoni della famiglia.', name: 'Prodotto', placeholder: 'Aggiungi alla lista', detail: 'Quantità', detailPlaceholder: 'Es. 2 confezioni', date: false },
+  reminders: { title: 'Promemoria familiari', intro: 'Scadenze e cose da ricordare, condivise con la famiglia.', name: 'Promemoria', placeholder: 'Cosa dobbiamo ricordare?', detail: 'Dettagli', detailPlaceholder: 'Facoltativo', date: true },
+  agenda: { title: 'Agenda condivisa', intro: 'Impegni e appuntamenti di tutti.', name: 'Impegno', placeholder: 'Aggiungi un appuntamento', detail: 'Luogo o dettagli', detailPlaceholder: 'Es. visita, Borgosesia', date: true },
+  notes: { title: 'Note veloci', intro: 'Informazioni e idee utili per tutti in famiglia.', name: 'Nota', placeholder: 'Scrivi una nota', detail: 'Dettagli', detailPlaceholder: 'Aggiungi un dettaglio', date: false }
+};
+let auth, db, currentUser, familyId, familyName = '', activeTab = 'shopping', authMode = 'login', unsubscribeItems, allItems = [], toastTimer;
+const setMessage = (id, text = '') => { $(id).textContent = text; };
+const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[char]));
+function formatDate(value) {
+  if (!value) return '';
+  const date = value.toDate ? value.toDate() : new Date(`${value}T00:00:00`);
+  return Number.isNaN(date.valueOf()) ? '' : new Intl.DateTimeFormat('it-IT', { dateStyle: 'medium' }).format(date);
+}
+function showToast(text) {
+  const toast = $('#toast'); toast.textContent = text; toast.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => toast.classList.remove('show'), 2400);
+}
+function setSync(status, label) {
+  $('#syncStatus').textContent = label;
+  $('#syncDot').className = `sync-dot ${status}`;
+}
+function clearSubscription() {
+  if (unsubscribeItems) unsubscribeItems();
+  unsubscribeItems = null; allItems = [];
+}
+function showAuth() {
+  $('#authScreen').classList.remove('hidden'); $('#appScreen').classList.add('hidden'); $('#logout').classList.add('hidden');
+}
+function showApp() {
+  $('#authScreen').classList.add('hidden'); $('#appScreen').classList.remove('hidden'); $('#logout').classList.remove('hidden');
+  $('#familyLabel').textContent = familyName || 'Spazio familiare condiviso';
+  $('#userLabel').textContent = currentUser?.email || '';
+  $('#inviteButton').classList.toggle('hidden', !currentUser || currentUser.role !== 'owner');
+  setSync('online', 'Collegamento attivo');
+  subscribeItems(); render();
+}
+async function activateProfile(user) {
+  const profileSnap = await getDoc(doc(db, 'users', user.uid));
+  if (!profileSnap.exists()) throw new Error('Account non ancora collegato a una famiglia.');
+  const profile = profileSnap.data(); familyId = profile.familyId; currentUser = { ...user, role: profile.role };
+  const familySnap = await getDoc(doc(db, 'families', familyId)); familyName = familySnap.exists() ? familySnap.data().name : 'Famiglia'; showApp();
+}
+function setAuthMode(mode) {
+  authMode = mode;
+  const creating = mode === 'create', joining = mode === 'join';
+  $('#authTitle').textContent = creating ? 'Crea lo spazio familiare' : joining ? 'Unisciti alla famiglia' : 'Accedi alla famiglia';
+  $('#authIntro').textContent = creating ? 'Crea il primo account. Gli altri entreranno con il codice invito.' : joining ? 'Crea un account personale e inserisci il codice ricevuto.' : 'Accedi con email e password. Non serve un account ChatGPT.';
+  $('#familyField').classList.toggle('hidden', !creating); $('#inviteField').classList.toggle('hidden', !joining);
+  $('#authSubmit').textContent = creating ? 'Crea la famiglia' : joining ? 'Unisciti' : 'Accedi';
+  $('#showCreate').classList.toggle('hidden', creating); $('#showJoin').classList.toggle('hidden', joining);
+  $('#showLogin').classList.toggle('hidden', !creating && !joining); setMessage('#authMessage');
+}
+function render() {
+  const meta = sectionNames[activeTab];
+  document.querySelectorAll('[data-tab]').forEach(button => button.classList.toggle('active', button.dataset.tab === activeTab));
+  $('#sectionTitle').textContent = meta.title; $('#sectionIntro').textContent = meta.intro;
+  $('#nameLabel').firstChild.textContent = `${meta.name} `;
+  $('#itemName').placeholder = meta.placeholder;
+  $('#detailLabel').firstChild.textContent = `${meta.detail} `; $('#itemDetail').placeholder = meta.detailPlaceholder;
+  $('#detailLabel').classList.toggle('hidden', activeTab === 'notes'); $('#dateLabel').classList.toggle('hidden', !meta.date);
+  const sorted = [...allItems].sort((a,b) => {
+    if (a.done !== b.done) return Number(a.done) - Number(b.done);
+    const da = a.date || '', db = b.date || '';
+    if (da !== db) return da.localeCompare(db);
+    const ta = a.createdAt?.toMillis?.() || 0, tb = b.createdAt?.toMillis?.() || 0;
+    return tb - ta;
+  });
+  if (!sorted.length) { $('#items').innerHTML = `<div class="empty">${activeTab === 'shopping' ? 'La lista è vuota. Aggiungi il primo prodotto.' : 'Nessun elemento per ora. Aggiungine uno qui sotto.'}</div>`; return; }
+  $('#items').innerHTML = sorted.map(item => `<article class="item ${item.done ? 'done' : ''}">
+    <input class="check" type="checkbox" aria-label="Segna come completato" data-check="${escapeHtml(item.id)}" ${item.done ? 'checked' : ''}>
+    <div class="item-main"><div class="item-name">${escapeHtml(item.name)}</div>${item.detail ? `<div class="item-detail">${escapeHtml(item.detail)}</div>` : ''}${item.date ? `<div class="item-date">📅 ${escapeHtml(formatDate(item.date))}</div>` : ''}</div>
+    <button class="delete" type="button" aria-label="Elimina elemento" data-delete="${escapeHtml(item.id)}">×</button></article>`).join('');
+  document.querySelectorAll('[data-check]').forEach(input => input.addEventListener('change', () => toggleItem(input.dataset.check, input.checked)));
+  document.querySelectorAll('[data-delete]').forEach(button => button.addEventListener('click', () => removeItem(button.dataset.delete)));
+}
+function subscribeItems() {
+  clearSubscription();
+  const itemsRef = collection(db, 'families', familyId, activeTab);
+  setSync(navigator.onLine ? 'online' : 'offline', navigator.onLine ? 'Sincronizzazione attiva' : 'Offline · le modifiche si aggiorneranno al ritorno online');
+  unsubscribeItems = onSnapshot(itemsRef, snapshot => {
+    allItems = snapshot.docs.map(itemDoc => ({ id: itemDoc.id, ...itemDoc.data() })); render();
+    setSync('online', 'Aggiornato su tutti i telefoni');
+  }, error => {
+    setSync('offline', 'Sincronizzazione non disponibile'); showToast('Errore di sincronizzazione. Controlla la connessione.'); console.error(error);
+  });
+}
+async function toggleItem(id, done) {
+  try { await updateDoc(doc(db, 'families', familyId, activeTab, id), { done, updatedAt: serverTimestamp() }); }
+  catch (error) { showToast('Non sono riuscito a salvare la modifica.'); console.error(error); }
+}
+async function removeItem(id) {
+  if (!confirm('Eliminare questo elemento?')) return;
+  try { await deleteDoc(doc(db, 'families', familyId, activeTab, id)); }
+  catch (error) { showToast('Non sono riuscito a eliminare l’elemento.'); console.error(error); }
+}
+$('#authForm').addEventListener('submit', async event => {
+  event.preventDefault(); const button = $('#authSubmit'); button.disabled = true; setMessage('#authMessage');
+  const email = $('#email').value.trim().toLowerCase(), password = $('#password').value;
+  try {
+    if (authMode === 'login') await signInWithEmailAndPassword(auth, email, password);
+    else if (authMode === 'create') {
+      const credential = await createUserWithEmailAndPassword(auth, email, password);
+      const name = $('#familyName').value.trim(); if (!name) throw new Error('Inserisci il nome della famiglia.');
+      const familyRef = doc(collection(db, 'families'));
+      const userRef = doc(db, 'users', credential.user.uid);
+      const batch = writeBatch(db);
+      batch.set(familyRef, { name, ownerUid: credential.user.uid, createdAt: serverTimestamp() });
+      batch.set(userRef, { familyId: familyRef.id, role: 'owner', email, createdAt: serverTimestamp() });
+      await batch.commit();
+      await activateProfile(credential.user);
+    } else {
+      let user = auth.currentUser;
+      if (!user) {
+        try { user = (await signInWithEmailAndPassword(auth, email, password)).user; }
+        catch (error) { if (error.code !== 'auth/user-not-found' && error.code !== 'auth/invalid-credential') throw error; user = (await createUserWithEmailAndPassword(auth, email, password)).user; }
+      }
+      const code = $('#inviteCode').value.trim().toUpperCase();
+      if (!/^[A-Z0-9]{20,40}$/.test(code)) throw new Error('Il codice invito non sembra valido.');
+      const inviteRef = doc(db, 'invites', code), profileRef = doc(db, 'users', user.uid);
+      await runTransaction(db, async transaction => {
+        const invitation = await transaction.get(inviteRef);
+        if (!invitation.exists() || invitation.data().status !== 'open') throw new Error('Codice inesistente o già utilizzato.');
+        const invite = invitation.data();
+        if (invite.expiresAt.toMillis() < Date.now()) throw new Error('Il codice è scaduto. Chiedi un nuovo invito.');
+        const profile = await transaction.get(profileRef);
+        if (profile.exists() && profile.data().familyId) throw new Error('Questo account è già collegato a una famiglia.');
+        transaction.update(inviteRef, { status: 'claimed', claimedBy: user.uid });
+        transaction.set(profileRef, { familyId: invite.familyId, role: 'member', email, inviteCode: code, createdAt: serverTimestamp() });
+      });
+      await activateProfile(user);
+    }
+  } catch (error) {
+    const messages = {
+      'auth/email-already-in-use': 'Questa email ha già un account. Accedi oppure usa quell’account per l’invito.',
+      'auth/invalid-credential': 'Email o password non corretti.',
+      'auth/weak-password': 'Scegli una password di almeno 8 caratteri.',
+      'auth/invalid-email': 'Controlla l’indirizzo email.',
+      'auth/too-many-requests': 'Troppi tentativi. Riprova più tardi.',
+      'permission-denied': 'Il codice non è valido o il database non è configurato correttamente.'
+    };
+    setMessage('#authMessage', messages[error.code] || error.message || 'Non è stato possibile completare l’operazione.');
+  } finally { button.disabled = false; }
+});
+$('#showCreate').addEventListener('click', () => setAuthMode('create'));
+$('#showJoin').addEventListener('click', () => setAuthMode('join'));
+$('#showLogin').addEventListener('click', () => setAuthMode('login'));
+$('#logout').addEventListener('click', async () => { clearSubscription(); await signOut(auth); });
+document.querySelectorAll('[data-tab]').forEach(button => button.addEventListener('click', () => { activeTab = button.dataset.tab; subscribeItems(); render(); }));
+$('#addForm').addEventListener('submit', async event => {
+  event.preventDefault(); const name = $('#itemName').value.trim(); if (!name || !familyId) return;
+  const data = { name, detail: activeTab === 'shopping' || activeTab !== 'notes' ? $('#itemDetail').value.trim() : '', date: sectionNames[activeTab].date ? $('#itemDate').value : '', done: false, createdBy: currentUser.uid, createdAt: serverTimestamp(), updatedAt: serverTimestamp() };
+  try { await addDoc(collection(db, 'families', familyId, activeTab), data); event.currentTarget.reset(); $('#itemName').focus(); }
+  catch (error) { showToast('Non sono riuscito a salvare. Riprova quando la connessione è attiva.'); console.error(error); }
+});
+$('#inviteButton').addEventListener('click', () => { $('#inviteResult').classList.add('hidden'); setMessage('#inviteMessage'); $('#inviteDialog').showModal(); });
+$('#createInvite').addEventListener('click', async () => {
+  const button = $('#createInvite'); button.disabled = true; setMessage('#inviteMessage');
+  try {
+    const bytes = new Uint8Array(20); crypto.getRandomValues(bytes); const code = Array.from(bytes, value => value.toString(16).padStart(2,'0')).join('').toUpperCase();
+    await setDoc(doc(db, 'invites', code), { familyId, createdBy: currentUser.uid, createdAt: serverTimestamp(), expiresAt: Timestamp.fromDate(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)), status: 'open' });
+    $('#inviteCodeOutput').value = code; $('#inviteResult').classList.remove('hidden');
+  } catch (error) { setMessage('#inviteMessage', 'Non sono riuscito a creare l’invito. Controlla la connessione.'); console.error(error); }
+  finally { button.disabled = false; }
+});
+$('#copyInvite').addEventListener('click', async () => { try { await navigator.clipboard.writeText($('#inviteCodeOutput').value); showToast('Codice copiato. Invialo in privato.'); } catch { $('#inviteCodeOutput').select(); document.execCommand('copy'); showToast('Codice copiato.'); } });
+window.addEventListener('online', () => setSync('online', 'Connessione ripristinata'));
+window.addEventListener('offline', () => setSync('offline', 'Offline · le modifiche si aggiorneranno al ritorno online'));
+
+if (!isFirebaseConfigured) {
+  showAuth(); setAuthMode('login'); setMessage('#authMessage', 'Il database online deve ancora essere collegato a questa app.'); $('#authSubmit').disabled = true;
+} else {
+  const firebaseApp = initializeApp(firebaseConfig); auth = getAuth(firebaseApp); db = getFirestore(firebaseApp);
+  setPersistence(auth, browserLocalPersistence).catch(console.error);
+  onAuthStateChanged(auth, async user => {
+    clearSubscription();
+    if (!user) { currentUser = null; familyId = null; showAuth(); return; }
+    try {
+      const profileSnap = await getDoc(doc(db, 'users', user.uid));
+      if (!profileSnap.exists()) { currentUser = user; showAuth(); setAuthMode('join'); setMessage('#authMessage', 'Questo account non è ancora collegato. Usa un codice invito o crea lo spazio familiare.'); return; }
+      await activateProfile(user);
+    } catch (error) { console.error(error); showAuth(); setMessage('#authMessage', 'Non riesco a leggere il profilo familiare. Controlla database e regole.'); }
+  });
+}
+if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('./sw.js').catch(console.error);
