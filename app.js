@@ -50,7 +50,7 @@ async function activateProfile(user) {
 function setAuthMode(mode) {
   authMode = mode;
   const creating = mode === 'create', joining = mode === 'join';
-  const existingUser = auth?.currentUser || null;
+  const existingUser = currentUser || auth?.currentUser || null;
   const passwordLabel = $('#password').closest('label');
   if (existingUser && (creating || joining)) {
     $('#email').value = existingUser.email || '';
