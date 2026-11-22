@@ -1,0 +1,60 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function profilePath(uid) { return /databases/$(database)/documents/users/$(uid); }
+    function familyPath(familyId) { return /databases/$(database)/documents/families/$(familyId); }
+    function invitePath(code) { return /databases/$(database)/documents/invites/$(code); }
+    function isMember(familyId) {
+      return signedIn() && exists(profilePath(request.auth.uid)) && get(profilePath(request.auth.uid)).data.familyId == familyId;
+    }
+    function isOwner(familyId) {
+      return isMember(familyId) && get(profilePath(request.auth.uid)).data.role == 'owner';
+    }
+    match /families/{familyId} {
+      allow read: if isMember(familyId);
+      allow create: if signedIn() && request.resource.data.ownerUid == request.auth.uid
+        && getAfter(profilePath(request.auth.uid)).data.familyId == familyId
+        && getAfter(profilePath(request.auth.uid)).data.role == 'owner';
+      allow update, delete: if isOwner(familyId);
+      match /{collection}/{itemId} {
+        allow read, create, update, delete: if isMember(familyId)
+          && collection in ['shopping', 'reminders', 'agenda', 'notes'];
+      }
+    }
+    match /users/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow create: if signedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['familyId','role','email','createdAt','inviteCode'])
+        && request.resource.data.email == request.auth.token.email
+        && ((request.resource.data.role == 'owner'
+             && getAfter(familyPath(request.resource.data.familyId)).data.ownerUid == uid)
+          || (request.resource.data.role == 'member'
+             && request.resource.data.inviteCode is string
+             && getAfter(invitePath(request.resource.data.inviteCode)).data.status == 'claimed'
+             && getAfter(invitePath(request.resource.data.inviteCode)).data.claimedBy == uid
+             && getAfter(invitePath(request.resource.data.inviteCode)).data.familyId == request.resource.data.familyId));
+      allow update: if signedIn() && request.auth.uid == uid
+        && request.resource.data.familyId == resource.data.familyId
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.email == resource.data.email;
+      allow delete: if false;
+    }
+    match /invites/{code} {
+      allow read: if signedIn() && resource.data.status == 'open';
+      allow create: if signedIn() && isOwner(request.resource.data.familyId)
+        && request.resource.data.keys().hasOnly(['familyId','createdBy','createdAt','expiresAt','status'])
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.status == 'open';
+      allow update: if signedIn() && resource.data.status == 'open'
+        && request.resource.data.familyId == resource.data.familyId
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.status == 'claimed'
+        && request.resource.data.claimedBy == request.auth.uid
+        && request.time < resource.data.expiresAt
+        && getAfter(profilePath(request.auth.uid)).data.familyId == resource.data.familyId
+        && getAfter(profilePath(request.auth.uid)).data.role == 'member';
+      allow delete: if isOwner(resource.data.familyId);
+    }
+  }
+}
