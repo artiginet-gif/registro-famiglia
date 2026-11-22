@@ -77,6 +77,42 @@ async function activateProfile(user) {
   const profile = profileSnap.data(); familyId = profile.familyId; currentUser = { ...user, role: profile.role };
   const familySnap = await getDoc(doc(db, 'families', familyId)); familyName = familySnap.exists() ? familySnap.data().name : 'Famiglia'; showApp();
 }
+async function claimInvite(user, rawCode) {
+  const code = String(rawCode || '').trim().toUpperCase();
+  if (!/^[A-Z0-9]{20,40}$/.test(code)) throw new Error('Il link di invito non è valido. Chiedi a Roberto di crearne uno nuovo.');
+  const inviteRef = doc(db, 'invites', code);
+  const profileRef = doc(db, 'users', user.uid);
+  await runTransaction(db, async transaction => {
+    const invitation = await transaction.get(inviteRef);
+    const profile = await transaction.get(profileRef);
+    if (!invitation.exists()) throw new Error('Invito non trovato. Chiedi a Roberto di creare un nuovo link.');
+    const invite = invitation.data();
+    if (invite.status === 'claimed') {
+      if (invite.claimedBy === user.uid && profile.exists() && profile.data().familyId === invite.familyId) return;
+      throw new Error('Questo invito è già stato utilizzato. Chiedi a Roberto un nuovo link.');
+    }
+    if (invite.status !== 'open') throw new Error('Questo invito non è più disponibile. Chiedi a Roberto un nuovo link.');
+    if (!invite.expiresAt || invite.expiresAt.toMillis() <= Date.now()) throw new Error('Il link di invito è scaduto. Chiedi a Roberto di crearne uno nuovo.');
+    if (invite.createdBy === user.uid) throw new Error('Questo è il tuo stesso invito. Apri il link ricevuto da Roberto.');
+    if (invite.targetEmail && (user.email || '').toLowerCase() !== invite.targetEmail.toLowerCase()) {
+      throw new Error('Questo invito è destinato a ' + invite.targetEmail + '. Accedi con quell’account.');
+    }
+    if (profile.exists() && profile.data().familyId === invite.familyId) {
+      transaction.update(inviteRef, { status: 'claimed', claimedBy: user.uid });
+      return;
+    }
+    transaction.update(inviteRef, { status: 'claimed', claimedBy: user.uid });
+    if (profile.exists()) {
+      transaction.update(profileRef, { familyId: invite.familyId, role: 'member', inviteCode: code });
+    } else {
+      transaction.set(profileRef, { familyId: invite.familyId, role: 'member', email: user.email || '', inviteCode: code, createdAt: serverTimestamp() });
+    }
+  });
+}
+function inviteErrorMessage(error) {
+  if (error?.code === 'permission-denied') return 'Firebase non ha autorizzato il collegamento. Chiedi a Roberto di generare un nuovo invito.';
+  return error?.message || 'Non è stato possibile completare il collegamento. Riprova.';
+}
 function setAuthMode(mode) {
   authMode = mode;
   const creating = mode === 'create', joining = mode === 'join';
@@ -171,22 +207,7 @@ $('#authForm').addEventListener('submit', async event => {
         try { user = (await signInWithEmailAndPassword(auth, email, password)).user; }
         catch (error) { if (error.code !== 'auth/user-not-found' && error.code !== 'auth/invalid-credential') throw error; user = (await createUserWithEmailAndPassword(auth, email, password)).user; }
       }
-      const inviteRef = doc(db, 'invites', code), profileRef = doc(db, 'users', user.uid);
-      await runTransaction(db, async transaction => {
-        const invitation = await transaction.get(inviteRef);
-        if (!invitation.exists() || invitation.data().status !== 'open') throw new Error('Codice inesistente o già utilizzato.');
-        const invite = invitation.data();
-        if (invite.expiresAt.toMillis() < Date.now()) throw new Error('Il codice è scaduto. Chiedi un nuovo invito.');
-        if (invite.targetEmail && (user.email || '').toLowerCase() !== invite.targetEmail.toLowerCase()) throw new Error('Questo invito è destinato a ' + invite.targetEmail + '. Apri il link usando quell’account.');
-        const profile = await transaction.get(profileRef);
-        if (profile.exists() && profile.data().familyId === invite.familyId) throw new Error('Questo account è già collegato a questa famiglia.');
-        transaction.update(inviteRef, { status: 'claimed', claimedBy: user.uid });
-        if (profile.exists()) {
-          transaction.update(profileRef, { familyId: invite.familyId, role: 'member', inviteCode: code });
-        } else {
-          transaction.set(profileRef, { familyId: invite.familyId, role: 'member', email, inviteCode: code, createdAt: serverTimestamp() });
-        }
-      });
+      await claimInvite(user, code);
       await activateProfile(user);
       if (validInviteCodeFromUrl) history.replaceState({}, document.title, location.pathname);
     }
@@ -273,17 +294,35 @@ if (!isFirebaseConfigured) {
     clearMembersSubscription();
     if (!user) { currentUser = null; familyId = null; showAuth(); return; }
     try {
+      if (validInviteCodeFromUrl) {
+        currentUser = user;
+        await claimInvite(user, validInviteCodeFromUrl);
+        await activateProfile(user);
+        history.replaceState({}, document.title, location.pathname);
+        showToast('Collegamento completato. Benvenuta nella Famiglia Garavello!');
+        return;
+      }
       const profileSnap = await getDoc(doc(db, 'users', user.uid));
-      if (!profileSnap.exists()) { currentUser = user; showAuth(); setAuthMode('join'); setMessage('#authMessage', validInviteCodeFromUrl ? 'Invito riconosciuto. Premi Unisciti per completare il collegamento.' : 'Questo account non è ancora collegato. Usa il link invito ricevuto o inserisci il codice.'); return; }
+      if (!profileSnap.exists()) {
+        currentUser = user;
+        showAuth();
+        setAuthMode('join');
+        setMessage('#authMessage', 'Accedi al tuo account e inserisci il codice invito ricevuto da Roberto.');
+        return;
+      }
+      await activateProfile(user);
+    } catch (error) {
+      console.error(error);
       if (validInviteCodeFromUrl) {
         currentUser = user;
         showAuth();
         setAuthMode('join');
-        setMessage('#authMessage', 'Hai già un account: useremo questo. Premi Unisciti per collegarlo alla famiglia di Roberto.');
-        return;
+        setMessage('#authMessage', inviteErrorMessage(error));
+      } else {
+        showAuth();
+        setMessage('#authMessage', 'Non riesco a leggere il profilo familiare. Controlla database e regole.');
       }
-      await activateProfile(user);
-    } catch (error) { console.error(error); showAuth(); setMessage('#authMessage', 'Non riesco a leggere il profilo familiare. Controlla database e regole.'); }
+    }
   });
 }
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('./sw.js').catch(console.error);
