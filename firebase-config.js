@@ -1,12 +1,11 @@
-// Incolla qui la configurazione della Web App Firebase del tuo progetto.
-// Questi valori identificano il progetto; la sicurezza dei dati è gestita dalle
-// regole Firestore (firestore.rules), non dal nascondere apiKey.
+// Configurazione pubblica dell'app Web Firebase Registro Famiglia.
+// La sicurezza è applicata dalle regole Firestore, non nascondendo questi valori.
 export const firebaseConfig = {
-  apiKey: "INCOLLA_API_KEY",
-  authDomain: "INCOLLA_PROJECT_ID.firebaseapp.com",
-  projectId: "INCOLLA_PROJECT_ID",
-  storageBucket: "INCOLLA_PROJECT_ID.firebasestorage.app",
-  messagingSenderId: "INCOLLA_MESSAGING_SENDER_ID",
-  appId: "INCOLLA_APP_ID"
+  apiKey: "AIzaSyCCiiLz1eK5FzrGnhcZ7gs17h_pKIOFGtM",
+  authDomain: "registro-famiglia.firebaseapp.com",
+  projectId: "registro-famiglia",
+  storageBucket: "registro-famiglia.firebasestorage.app",
+  messagingSenderId: "684463878503",
+  appId: "1:684463878503:web:ed3be9843745627c3dffc2"
 };
-export const isFirebaseConfigured = !Object.values(firebaseConfig).some(value => String(value).startsWith("INCOLLA_"));
+export const isFirebaseConfigured = true;
