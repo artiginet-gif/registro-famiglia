@@ -12,6 +12,9 @@ const sectionNames = {
 };
 let auth, db, currentUser, familyId, familyName = '', activeTab = 'shopping', authMode = 'login', unsubscribeItems, allItems = [], toastTimer;
 let unsubscribeMembers;
+const inviteParams = new URLSearchParams(location.search);
+const inviteCodeFromUrl = (inviteParams.get('invite') || inviteParams.get('invito') || '').trim().toUpperCase();
+const validInviteCodeFromUrl = /^[A-Z0-9]{20,40}$/.test(inviteCodeFromUrl) ? inviteCodeFromUrl : '';
 const setMessage = (id, text = '') => { $(id).textContent = text; };
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[char]));
 function formatDate(value) {
@@ -92,8 +95,9 @@ function setAuthMode(mode) {
   }
   if (creating && !$('#familyName').value) $('#familyName').value = 'Famiglia Garavello';
   $('#authTitle').textContent = creating ? 'Crea lo spazio familiare' : joining ? 'Unisciti alla famiglia' : 'Accedi alla famiglia';
-  $('#authIntro').textContent = creating ? (existingUser ? 'Crea lo spazio familiare usando il tuo account già autenticato.' : 'Crea il primo account. Gli altri entreranno con il codice invito.') : joining ? 'Crea un account personale e inserisci il codice ricevuto.' : 'Accedi con email e password. Non serve un account ChatGPT.';
-  $('#familyField').classList.toggle('hidden', !creating); $('#inviteField').classList.toggle('hidden', !joining);
+  $('#authIntro').textContent = creating ? (existingUser ? 'Crea lo spazio familiare usando il tuo account già autenticato.' : 'Crea il primo account. Gli altri entreranno con un link personale.') : joining ? (validInviteCodeFromUrl ? 'Invito già riconosciuto. Inserisci la tua email e scegli una password: ti collegheremo automaticamente.' : 'Crea un account personale e inserisci il codice ricevuto.') : 'Accedi con email e password. Non serve un account ChatGPT.';
+  $('#familyField').classList.toggle('hidden', !creating); $('#inviteField').classList.toggle('hidden', !joining || Boolean(validInviteCodeFromUrl));
+  if (validInviteCodeFromUrl) $('#inviteCode').value = validInviteCodeFromUrl;
   $('#authSubmit').textContent = creating ? 'Crea la famiglia' : joining ? 'Unisciti' : 'Accedi';
   $('#showCreate').classList.toggle('hidden', creating); $('#showJoin').classList.toggle('hidden', joining);
   $('#showLogin').classList.toggle('hidden', !creating && !joining); setMessage('#authMessage');
@@ -160,13 +164,13 @@ $('#authForm').addEventListener('submit', async event => {
       await batch.commit();
       await activateProfile(user);
     } else {
+      const code = (validInviteCodeFromUrl || $('#inviteCode').value).trim().toUpperCase();
+      if (!/^[A-Z0-9]{20,40}$/.test(code)) throw new Error('Il link di invito non è valido. Chiedi a Roberto di crearne uno nuovo.');
       let user = auth.currentUser;
       if (!user) {
         try { user = (await signInWithEmailAndPassword(auth, email, password)).user; }
         catch (error) { if (error.code !== 'auth/user-not-found' && error.code !== 'auth/invalid-credential') throw error; user = (await createUserWithEmailAndPassword(auth, email, password)).user; }
       }
-      const code = $('#inviteCode').value.trim().toUpperCase();
-      if (!/^[A-Z0-9]{20,40}$/.test(code)) throw new Error('Il codice invito non sembra valido.');
       const inviteRef = doc(db, 'invites', code), profileRef = doc(db, 'users', user.uid);
       await runTransaction(db, async transaction => {
         const invitation = await transaction.get(inviteRef);
@@ -179,6 +183,7 @@ $('#authForm').addEventListener('submit', async event => {
         transaction.set(profileRef, { familyId: invite.familyId, role: 'member', email, inviteCode: code, createdAt: serverTimestamp() });
       });
       await activateProfile(user);
+      if (validInviteCodeFromUrl) history.replaceState({}, document.title, location.pathname);
     }
   } catch (error) {
     const messages = {
@@ -187,7 +192,7 @@ $('#authForm').addEventListener('submit', async event => {
       'auth/weak-password': 'Scegli una password di almeno 8 caratteri.',
       'auth/invalid-email': 'Controlla l’indirizzo email.',
       'auth/too-many-requests': 'Troppi tentativi. Riprova più tardi.',
-      'permission-denied': 'Il codice non è valido o il database non è configurato correttamente.'
+      'permission-denied': 'Firebase non ha autorizzato il collegamento. Il link potrebbe essere già stato usato o non essere più valido: chiedi a Roberto un nuovo invito.'
     };
     setMessage('#authMessage', messages[error.code] || error.message || 'Non è stato possibile completare l’operazione.');
   } finally { button.disabled = false; }
@@ -225,16 +230,36 @@ $('#createInvite').addEventListener('click', async () => {
   try {
     const bytes = new Uint8Array(20); crypto.getRandomValues(bytes); const code = Array.from(bytes, value => value.toString(16).padStart(2,'0')).join('').toUpperCase();
     await setDoc(doc(db, 'invites', code), { familyId, createdBy: currentUser.uid, createdAt: serverTimestamp(), expiresAt: Timestamp.fromDate(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)), status: 'open' });
-    $('#inviteCodeOutput').value = code; $('#inviteResult').classList.remove('hidden');
+    const inviteUrl = new URL(location.href);
+    inviteUrl.search = '';
+    inviteUrl.hash = '';
+    inviteUrl.searchParams.set('invite', code);
+    $('#inviteCodeOutput').value = code;
+    $('#inviteLinkOutput').value = inviteUrl.toString();
+    $('#whatsappInviteLink').href = 'https://wa.me/?text=' + encodeURIComponent('Ciao Ele, apri questo link per collegarti direttamente alla famiglia su Registro Famiglia: ' + inviteUrl.toString());
+    $('#inviteResult').classList.remove('hidden');
   } catch (error) { setMessage('#inviteMessage', 'Non sono riuscito a creare l’invito. Controlla la connessione.'); console.error(error); }
   finally { button.disabled = false; }
 });
-$('#copyInvite').addEventListener('click', async () => { try { await navigator.clipboard.writeText($('#inviteCodeOutput').value); showToast('Codice copiato. Invialo in privato.'); } catch { $('#inviteCodeOutput').select(); document.execCommand('copy'); showToast('Codice copiato.'); } });
+$('#copyInviteLink').addEventListener('click', async () => {
+  const link = $('#inviteLinkOutput').value;
+  try { await navigator.clipboard.writeText(link); showToast('Link copiato. Invialo a Eleonora su WhatsApp.'); }
+  catch { $('#inviteLinkOutput').select(); document.execCommand('copy'); showToast('Link selezionato: copialo e invialo a Eleonora.'); }
+});
 window.addEventListener('online', () => { if (familyId) subscribeItems(); });
 window.addEventListener('offline', () => setSync('offline', 'Offline · le modifiche si aggiorneranno al ritorno online'));
 
+if (validInviteCodeFromUrl) {
+  $('#inviteCode').value = validInviteCodeFromUrl;
+  setAuthMode('join');
+  setMessage('#authMessage', 'Invito riconosciuto: inserisci la tua email e password, poi premi Unisciti.');
+} else if (inviteCodeFromUrl) {
+  setAuthMode('join');
+  setMessage('#authMessage', 'Il link contiene un codice non valido. Chiedi a Roberto un nuovo invito.');
+}
+
 if (!isFirebaseConfigured) {
-  showAuth(); setAuthMode('login'); setMessage('#authMessage', 'Il database online deve ancora essere collegato a questa app.'); $('#authSubmit').disabled = true;
+  showAuth(); setAuthMode(validInviteCodeFromUrl ? 'join' : 'login'); setMessage('#authMessage', 'Il database online deve ancora essere collegato a questa app.'); $('#authSubmit').disabled = true;
 } else {
   const firebaseApp = initializeApp(firebaseConfig); auth = getAuth(firebaseApp); db = getFirestore(firebaseApp);
   setPersistence(auth, browserLocalPersistence).catch(console.error);
@@ -244,7 +269,7 @@ if (!isFirebaseConfigured) {
     if (!user) { currentUser = null; familyId = null; showAuth(); return; }
     try {
       const profileSnap = await getDoc(doc(db, 'users', user.uid));
-      if (!profileSnap.exists()) { currentUser = user; showAuth(); setAuthMode('join'); setMessage('#authMessage', 'Questo account non è ancora collegato. Usa un codice invito o crea lo spazio familiare.'); return; }
+      if (!profileSnap.exists()) { currentUser = user; showAuth(); setAuthMode('join'); setMessage('#authMessage', validInviteCodeFromUrl ? 'Invito riconosciuto. Premi Unisciti per completare il collegamento.' : 'Questo account non è ancora collegato. Usa il link invito ricevuto o inserisci il codice.'); return; }
       await activateProfile(user);
     } catch (error) { console.error(error); showAuth(); setMessage('#authMessage', 'Non riesco a leggere il profilo familiare. Controlla database e regole.'); }
   });
