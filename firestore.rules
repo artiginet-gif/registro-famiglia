@@ -23,7 +23,7 @@ service cloud.firestore {
       }
     }
     match /users/{uid} {
-      allow read: if signedIn() && request.auth.uid == uid;
+      allow read: if signedIn() && (request.auth.uid == uid || isMember(resource.data.familyId));
       allow create: if signedIn() && request.auth.uid == uid
         && request.resource.data.keys().hasOnly(['familyId','role','email','createdAt','inviteCode'])
         && request.resource.data.email == request.auth.token.email
@@ -35,6 +35,9 @@ service cloud.firestore {
              && getAfter(invitePath(request.resource.data.inviteCode)).data.claimedBy == uid
              && getAfter(invitePath(request.resource.data.inviteCode)).data.familyId == request.resource.data.familyId));
       allow update: if signedIn() && request.auth.uid == uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName'])
+        && request.resource.data.displayName is string
+        && request.resource.data.displayName.size() <= 60
         && request.resource.data.familyId == resource.data.familyId
         && request.resource.data.role == resource.data.role
         && request.resource.data.email == resource.data.email;

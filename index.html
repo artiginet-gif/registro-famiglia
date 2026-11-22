@@ -52,6 +52,17 @@
         </form>
       </section>
       <div class="sync-line"><span id="syncDot" class="sync-dot"></span><span id="syncStatus">Collegamento in corso</span><span id="userLabel"></span></div>
+      <section class="card people-card" aria-labelledby="peopleTitle">
+        <div class="people-head"><h2 id="peopleTitle">Persone collegate</h2><span id="memberCount" class="member-count" aria-live="polite">Caricamento…</span></div>
+        <ul id="memberList" class="member-list"></ul>
+        <p id="membersMessage" class="message" role="status" aria-live="polite"></p>
+        <form id="profileForm" class="profile-form">
+          <label for="displayName">Il tuo nome visualizzato<input id="displayName" maxlength="60" autocomplete="nickname" placeholder="Es. Roberto" aria-describedby="profileHint"></label>
+          <button id="saveDisplayName" class="primary" type="submit">Salva nome</button>
+        </form>
+        <p id="profileHint" class="muted">Lascia vuoto per mostrare la tua email.</p>
+        <p id="profileMessage" class="message" role="status" aria-live="polite"></p>
+      </section>
       <p class="footnote">Solo le persone con un account familiare e un invito possono leggere o modificare questi dati.</p>
     </section>
   </main>

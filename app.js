@@ -1,6 +1,6 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/13.4.0/firebase-app.js';
 import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, setPersistence, browserLocalPersistence } from 'https://www.gstatic.com/firebasejs/13.4.0/firebase-auth.js';
-import { getFirestore, doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, collection, onSnapshot, serverTimestamp, Timestamp, runTransaction, writeBatch } from 'https://www.gstatic.com/firebasejs/13.4.0/firebase-firestore.js';
+import { getFirestore, doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, collection, query, where, onSnapshot, serverTimestamp, Timestamp, runTransaction, writeBatch } from 'https://www.gstatic.com/firebasejs/13.4.0/firebase-firestore.js';
 import { firebaseConfig, isFirebaseConfigured } from './firebase-config.js';
 
 const $ = selector => document.querySelector(selector);
@@ -11,6 +11,7 @@ const sectionNames = {
   notes: { title: 'Note veloci', intro: 'Informazioni e idee utili per tutti in famiglia.', name: 'Nota', placeholder: 'Scrivi una nota', detail: 'Dettagli', detailPlaceholder: 'Aggiungi un dettaglio', date: false }
 };
 let auth, db, currentUser, familyId, familyName = '', activeTab = 'shopping', authMode = 'login', unsubscribeItems, allItems = [], toastTimer;
+let unsubscribeMembers;
 const setMessage = (id, text = '') => { $(id).textContent = text; };
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[char]));
 function formatDate(value) {
@@ -30,6 +31,33 @@ function clearSubscription() {
   if (unsubscribeItems) unsubscribeItems();
   unsubscribeItems = null; allItems = [];
 }
+function clearMembersSubscription() {
+  if (unsubscribeMembers) unsubscribeMembers();
+  unsubscribeMembers = null;
+  $('#memberList').replaceChildren();
+  $('#memberCount').textContent = 'Caricamento…';
+  $('#displayName').value = '';
+  setMessage('#membersMessage');
+  setMessage('#profileMessage');
+}
+function subscribeMembers() {
+  clearMembersSubscription();
+  const membersRef = query(collection(db, 'users'), where('familyId', '==', familyId));
+  unsubscribeMembers = onSnapshot(membersRef, { includeMetadataChanges: true }, snapshot => {
+    const members = snapshot.docs.map(member => ({ ...member.data(), uid: member.id }));
+    members.sort((a, b) => (a.displayName || a.email || '').localeCompare(b.displayName || b.email || '', 'it'));
+    $('#memberCount').textContent = `${members.length} ${members.length === 1 ? 'membro' : 'membri'}`;
+    $('#memberList').innerHTML = members.map(member => `<li class="member"><div class="member-info"><span class="member-name">${escapeHtml(member.displayName || member.email || 'Account familiare')}</span><span class="member-role">${member.role === 'owner' ? 'Proprietario' : 'Membro'}</span></div>${member.uid === currentUser.uid ? '<span class="member-self">Tu</span>' : ''}</li>`).join('');
+    const ownProfile = members.find(member => member.uid === currentUser.uid);
+    if (ownProfile && document.activeElement !== $('#displayName')) $('#displayName').value = ownProfile.displayName || '';
+    setMessage('#membersMessage', snapshot.metadata.fromCache ? 'Elenco locale: in attesa di conferma dal cloud.' : '');
+  }, error => {
+    $('#memberCount').textContent = 'Elenco non disponibile';
+    $('#memberList').replaceChildren();
+    setMessage('#membersMessage', 'Non riesco a caricare le persone collegate. Controlla la connessione e le regole di accesso.');
+    console.error(error);
+  });
+}
 function showAuth() {
   $('#authScreen').classList.remove('hidden'); $('#appScreen').classList.add('hidden'); $('#logout').classList.add('hidden');
 }
@@ -38,8 +66,7 @@ function showApp() {
   $('#familyLabel').textContent = familyName || 'Spazio familiare condiviso';
   $('#userLabel').textContent = currentUser?.email || '';
   $('#inviteButton').classList.toggle('hidden', !currentUser || currentUser.role !== 'owner');
-  setSync('online', 'Collegamento attivo');
-  subscribeItems(); render();
+  subscribeMembers(); subscribeItems(); render();
 }
 async function activateProfile(user) {
   const profileSnap = await getDoc(doc(db, 'users', user.uid));
@@ -97,10 +124,10 @@ function render() {
 function subscribeItems() {
   clearSubscription();
   const itemsRef = collection(db, 'families', familyId, activeTab);
-  setSync(navigator.onLine ? 'online' : 'offline', navigator.onLine ? 'Sincronizzazione attiva' : 'Offline · le modifiche si aggiorneranno al ritorno online');
-  unsubscribeItems = onSnapshot(itemsRef, snapshot => {
+  setSync(navigator.onLine ? '' : 'offline', navigator.onLine ? 'Collegamento al cloud in corso' : 'Offline · le modifiche si aggiorneranno al ritorno online');
+  unsubscribeItems = onSnapshot(itemsRef, { includeMetadataChanges: true }, snapshot => {
     allItems = snapshot.docs.map(itemDoc => ({ id: itemDoc.id, ...itemDoc.data() })); render();
-    setSync('online', 'Aggiornato su tutti i telefoni');
+    setSync(snapshot.metadata.fromCache ? '' : 'online', snapshot.metadata.fromCache ? 'Dati locali · in attesa del cloud' : 'Sincronizzazione cloud attiva');
   }, error => {
     setSync('offline', 'Sincronizzazione non disponibile'); showToast('Errore di sincronizzazione. Controlla la connessione.'); console.error(error);
   });
@@ -168,7 +195,23 @@ $('#authForm').addEventListener('submit', async event => {
 $('#showCreate').addEventListener('click', () => setAuthMode('create'));
 $('#showJoin').addEventListener('click', () => setAuthMode('join'));
 $('#showLogin').addEventListener('click', () => setAuthMode('login'));
-$('#logout').addEventListener('click', async () => { clearSubscription(); await signOut(auth); });
+$('#logout').addEventListener('click', async () => { await signOut(auth); });
+$('#profileForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const displayName = $('#displayName').value.trim();
+  if (!currentUser || !familyId) return;
+  if (displayName.length > 60) { setMessage('#profileMessage', 'Il nome può contenere al massimo 60 caratteri.'); return; }
+  const button = $('#saveDisplayName'); button.disabled = true;
+  const uid = currentUser.uid;
+  setMessage('#profileMessage', 'Salvataggio in corso…');
+  try {
+    await updateDoc(doc(db, 'users', uid), { displayName });
+    if (currentUser?.uid === uid) setMessage('#profileMessage', 'Nome salvato.');
+  } catch (error) {
+    if (currentUser?.uid === uid) setMessage('#profileMessage', 'Non riesco a salvare il nome. Controlla la connessione e riprova.');
+    console.error(error);
+  } finally { button.disabled = false; }
+});
 document.querySelectorAll('[data-tab]').forEach(button => button.addEventListener('click', () => { activeTab = button.dataset.tab; subscribeItems(); render(); }));
 $('#addForm').addEventListener('submit', async event => {
   event.preventDefault(); const name = $('#itemName').value.trim(); if (!name || !familyId) return;
@@ -187,7 +230,7 @@ $('#createInvite').addEventListener('click', async () => {
   finally { button.disabled = false; }
 });
 $('#copyInvite').addEventListener('click', async () => { try { await navigator.clipboard.writeText($('#inviteCodeOutput').value); showToast('Codice copiato. Invialo in privato.'); } catch { $('#inviteCodeOutput').select(); document.execCommand('copy'); showToast('Codice copiato.'); } });
-window.addEventListener('online', () => setSync('online', 'Connessione ripristinata'));
+window.addEventListener('online', () => { if (familyId) subscribeItems(); });
 window.addEventListener('offline', () => setSync('offline', 'Offline · le modifiche si aggiorneranno al ritorno online'));
 
 if (!isFirebaseConfigured) {
@@ -197,6 +240,7 @@ if (!isFirebaseConfigured) {
   setPersistence(auth, browserLocalPersistence).catch(console.error);
   onAuthStateChanged(auth, async user => {
     clearSubscription();
+    clearMembersSubscription();
     if (!user) { currentUser = null; familyId = null; showAuth(); return; }
     try {
       const profileSnap = await getDoc(doc(db, 'users', user.uid));
