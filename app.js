@@ -178,9 +178,13 @@ $('#authForm').addEventListener('submit', async event => {
         const invite = invitation.data();
         if (invite.expiresAt.toMillis() < Date.now()) throw new Error('Il codice è scaduto. Chiedi un nuovo invito.');
         const profile = await transaction.get(profileRef);
-        if (profile.exists() && profile.data().familyId) throw new Error('Questo account è già collegato a una famiglia.');
+        if (profile.exists() && profile.data().familyId === invite.familyId) throw new Error('Questo account è già collegato a questa famiglia.');
         transaction.update(inviteRef, { status: 'claimed', claimedBy: user.uid });
-        transaction.set(profileRef, { familyId: invite.familyId, role: 'member', email, inviteCode: code, createdAt: serverTimestamp() });
+        if (profile.exists()) {
+          transaction.update(profileRef, { familyId: invite.familyId, role: 'member', inviteCode: code });
+        } else {
+          transaction.set(profileRef, { familyId: invite.familyId, role: 'member', email, inviteCode: code, createdAt: serverTimestamp() });
+        }
       });
       await activateProfile(user);
       if (validInviteCodeFromUrl) history.replaceState({}, document.title, location.pathname);
@@ -270,6 +274,13 @@ if (!isFirebaseConfigured) {
     try {
       const profileSnap = await getDoc(doc(db, 'users', user.uid));
       if (!profileSnap.exists()) { currentUser = user; showAuth(); setAuthMode('join'); setMessage('#authMessage', validInviteCodeFromUrl ? 'Invito riconosciuto. Premi Unisciti per completare il collegamento.' : 'Questo account non è ancora collegato. Usa il link invito ricevuto o inserisci il codice.'); return; }
+      if (validInviteCodeFromUrl) {
+        currentUser = user;
+        showAuth();
+        setAuthMode('join');
+        setMessage('#authMessage', 'Hai già un account: useremo questo. Premi Unisciti per collegarlo alla famiglia di Roberto.');
+        return;
+      }
       await activateProfile(user);
     } catch (error) { console.error(error); showAuth(); setMessage('#authMessage', 'Non riesco a leggere il profilo familiare. Controlla database e regole.'); }
   });

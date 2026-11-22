@@ -35,12 +35,23 @@ service cloud.firestore {
              && getAfter(invitePath(request.resource.data.inviteCode)).data.claimedBy == uid
              && getAfter(invitePath(request.resource.data.inviteCode)).data.familyId == request.resource.data.familyId));
       allow update: if signedIn() && request.auth.uid == uid
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName'])
-        && request.resource.data.displayName is string
-        && request.resource.data.displayName.size() <= 60
-        && request.resource.data.familyId == resource.data.familyId
-        && request.resource.data.role == resource.data.role
-        && request.resource.data.email == resource.data.email;
+        && (
+          (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName'])
+            && request.resource.data.displayName is string
+            && request.resource.data.displayName.size() <= 60
+            && request.resource.data.familyId == resource.data.familyId
+            && request.resource.data.role == resource.data.role
+            && request.resource.data.email == resource.data.email)
+          ||
+          (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['familyId','role','inviteCode'])
+            && request.resource.data.familyId is string
+            && request.resource.data.role == 'member'
+            && request.resource.data.inviteCode is string
+            && request.resource.data.email == resource.data.email
+            && getAfter(invitePath(request.resource.data.inviteCode)).data.status == 'claimed'
+            && getAfter(invitePath(request.resource.data.inviteCode)).data.claimedBy == uid
+            && getAfter(invitePath(request.resource.data.inviteCode)).data.familyId == request.resource.data.familyId)
+        );
       allow delete: if false;
     }
     match /invites/{code} {
