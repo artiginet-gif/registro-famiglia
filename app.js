@@ -177,6 +177,7 @@ $('#authForm').addEventListener('submit', async event => {
         if (!invitation.exists() || invitation.data().status !== 'open') throw new Error('Codice inesistente o già utilizzato.');
         const invite = invitation.data();
         if (invite.expiresAt.toMillis() < Date.now()) throw new Error('Il codice è scaduto. Chiedi un nuovo invito.');
+        if (invite.targetEmail && (user.email || '').toLowerCase() !== invite.targetEmail.toLowerCase()) throw new Error('Questo invito è destinato a ' + invite.targetEmail + '. Apri il link usando quell’account.');
         const profile = await transaction.get(profileRef);
         if (profile.exists() && profile.data().familyId === invite.familyId) throw new Error('Questo account è già collegato a questa famiglia.');
         transaction.update(inviteRef, { status: 'claimed', claimedBy: user.uid });
