@@ -41,7 +41,8 @@ service cloud.firestore {
       allow delete: if false;
     }
     match /invites/{code} {
-      allow read: if signedIn() && resource.data.status == 'open';
+      allow get: if signedIn() && resource.data.status == 'open';
+      allow list: if false;
       allow create: if signedIn() && isOwner(request.resource.data.familyId)
         && request.resource.data.keys().hasOnly(['familyId','createdBy','createdAt','expiresAt','status'])
         && request.resource.data.createdBy == request.auth.uid
