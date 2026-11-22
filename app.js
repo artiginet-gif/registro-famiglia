@@ -50,8 +50,22 @@ async function activateProfile(user) {
 function setAuthMode(mode) {
   authMode = mode;
   const creating = mode === 'create', joining = mode === 'join';
+  const existingUser = auth?.currentUser || null;
+  const passwordLabel = $('#password').closest('label');
+  if (existingUser && (creating || joining)) {
+    $('#email').value = existingUser.email || '';
+    $('#email').readOnly = true;
+    $('#password').value = '';
+    $('#password').required = false;
+    passwordLabel.classList.add('hidden');
+  } else {
+    $('#email').readOnly = false;
+    $('#password').required = true;
+    passwordLabel.classList.remove('hidden');
+  }
+  if (creating && !$('#familyName').value) $('#familyName').value = 'Famiglia Garavello';
   $('#authTitle').textContent = creating ? 'Crea lo spazio familiare' : joining ? 'Unisciti alla famiglia' : 'Accedi alla famiglia';
-  $('#authIntro').textContent = creating ? 'Crea il primo account. Gli altri entreranno con il codice invito.' : joining ? 'Crea un account personale e inserisci il codice ricevuto.' : 'Accedi con email e password. Non serve un account ChatGPT.';
+  $('#authIntro').textContent = creating ? (existingUser ? 'Crea lo spazio familiare usando il tuo account già autenticato.' : 'Crea il primo account. Gli altri entreranno con il codice invito.') : joining ? 'Crea un account personale e inserisci il codice ricevuto.' : 'Accedi con email e password. Non serve un account ChatGPT.';
   $('#familyField').classList.toggle('hidden', !creating); $('#inviteField').classList.toggle('hidden', !joining);
   $('#authSubmit').textContent = creating ? 'Crea la famiglia' : joining ? 'Unisciti' : 'Accedi';
   $('#showCreate').classList.toggle('hidden', creating); $('#showJoin').classList.toggle('hidden', joining);
@@ -106,15 +120,18 @@ $('#authForm').addEventListener('submit', async event => {
   try {
     if (authMode === 'login') await signInWithEmailAndPassword(auth, email, password);
     else if (authMode === 'create') {
-      const credential = await createUserWithEmailAndPassword(auth, email, password);
+      const user = auth.currentUser || (await createUserWithEmailAndPassword(auth, email, password)).user;
+      if (user.email && user.email.toLowerCase() !== email) throw new Error('Esci e accedi con l’account corretto.');
+      const existingProfile = await getDoc(doc(db, 'users', user.uid));
+      if (existingProfile.exists() && existingProfile.data().familyId) throw new Error('Questo account è già collegato a una famiglia.');
       const name = $('#familyName').value.trim(); if (!name) throw new Error('Inserisci il nome della famiglia.');
       const familyRef = doc(collection(db, 'families'));
-      const userRef = doc(db, 'users', credential.user.uid);
+      const userRef = doc(db, 'users', user.uid);
       const batch = writeBatch(db);
-      batch.set(familyRef, { name, ownerUid: credential.user.uid, createdAt: serverTimestamp() });
-      batch.set(userRef, { familyId: familyRef.id, role: 'owner', email, createdAt: serverTimestamp() });
+      batch.set(familyRef, { name, ownerUid: user.uid, createdAt: serverTimestamp() });
+      batch.set(userRef, { familyId: familyRef.id, role: 'owner', email: user.email || email, createdAt: serverTimestamp() });
       await batch.commit();
-      await activateProfile(credential.user);
+      await activateProfile(user);
     } else {
       let user = auth.currentUser;
       if (!user) {
